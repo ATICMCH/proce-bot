@@ -131,7 +131,7 @@ if (process.env.GOOGLE_SERVICE_ACCOUNT_BASE64) {
 /* ================== CONFIG ================== */
 
 // ---- Google Sheets (AppSheet escribe aquí) ----
-const SPREADSHEET_ID = process.env.SHEET_ID || '1ataoMxpKoOTdoQWDEAX0vO2k7icEoPtz8TDvY51G5Fc'; // SOLO el ID
+const SPREADSHEET_ID = process.env.SHEET_ID || '1ZW__7IeXpwzTu9TDzA8IToKwFpiq3q_gtvgYwDnhbKg'; // SOLO el ID
 const SHEET_RANGE    = process.env.SHEET_RANGE || 'Mensajes!A:B'; // A: Code, B: Message (no esencial, usamos A1:Z)
 const SA_FILE        = process.env.SA_FILE || 'service-account.json';
 
