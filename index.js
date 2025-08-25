@@ -112,7 +112,7 @@ app.get('/qr-data', async (req, res) => {
 
 app.get('/', (req, res) => res.redirect('/qr'));
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Servidor Express escuchando en http://localhost:${PORT}/qr`);
 });
 const { google } = require('googleapis');
