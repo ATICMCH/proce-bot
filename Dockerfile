@@ -1,20 +1,32 @@
-# Use official Node.js image
+# Usa imagen oficial de Node.js
 FROM node:20-alpine
 
-# Set working directory
+# Instala Chromium y dependencias necesarias
+RUN apk add --no-cache \
+    chromium \
+    nss \
+    freetype \
+    harfbuzz \
+    ca-certificates \
+    ttf-freefont
+
+# Establece el directorio de trabajo
 WORKDIR /app
 
-# Copy package.json and package-lock.json
+# Copia los archivos de dependencias
 COPY package*.json ./
 
-# Install dependencies
+# Instala dependencias
 RUN npm install --production
 
-# Copy the rest of the code
+# Copia el resto del código
 COPY . .
 
-# Expose port (cambia si tu app usa otro puerto)
+# Expón el puerto (ajusta si usas otro)
 EXPOSE 3000
 
-# Start the app
+# Variable de entorno para Puppeteer
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+
+# Comando de inicio
 CMD ["node", "index.js"]
