@@ -119,6 +119,15 @@ const { google } = require('googleapis');
 const fs = require('fs');
 const path = require('path');
 
+if (process.env.GOOGLE_SERVICE_ACCOUNT_BASE64) {
+  const jsonPath = path.join(__dirname, 'service-account.json');
+  fs.writeFileSync(
+    jsonPath,
+    Buffer.from(process.env.GOOGLE_SERVICE_ACCOUNT_BASE64, 'base64').toString('utf-8')
+  );
+}
+// Ahora puedes usar service-account.json normalmente
+
 /* ================== CONFIG ================== */
 
 // ---- Google Sheets (AppSheet escribe aquí) ----
