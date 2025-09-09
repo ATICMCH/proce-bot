@@ -32,7 +32,7 @@ async function updateAvWPP(phone, code) {
       codes.push(code);
     }
     // Ensure codes are always in the order of FLOW
-    const FLOW_ORDER = ['11','12','13','14','21','22','23','24','31','33','41','NF','Des'];
+    const FLOW_ORDER = ['11','12','13','14','21','22','23','24','31','33','41','NF','2NF'];
     codes = codes.filter(c => FLOW_ORDER.includes(c));
     codes.sort((a, b) => FLOW_ORDER.indexOf(a) - FLOW_ORDER.indexOf(b));
     // Only keep up to and including the current code
@@ -50,88 +50,109 @@ async function updateAvWPP(phone, code) {
     console.error('[SHEET] Error updating AvWPP:', e?.message || e);
   }
 }
+
+// Helper: Update status from Active to Inactive when 2NF is sent
+async function updateStatusToInactive(phone) {
+  try {
+    const sheets = await getSheetsClient();
+    // Fetch all candidates to find the row
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A1:Z10000`
+    });
+    const rows = res.data.values || [];
+    if (!rows.length) return;
+    
+    // Find the row index (1-based for Sheets API)
+    const phoneCol = COL.phone - 1;
+    const statusCol = 18; // S = 19th column, 0-based index is 18
+    let foundRow = -1;
+    
+    for (let i = 1; i < rows.length; ++i) {
+      const rowPhone = (rows[i][phoneCol] || '').replace(/\s+/g, '');
+      if (normalizePhoneE164(rowPhone) === normalizePhoneE164(phone)) {
+        foundRow = i + 1; // +1 for header row, +1 for 1-based
+        break;
+      }
+    }
+    if (foundRow === -1) return;
+    
+    // Update the status cell to "Inactivo"
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!S${foundRow}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [['Inactivo']] }
+    });
+    console.log(`[SHEET] Updated status to Inactivo for ${phone}`);
+  } catch (e) {
+    console.error('[SHEET] Error updating status:', e?.message || e);
+  }
+}
+
+// Helper: Update Notes column (column I = index 8)
+async function updateNotes(phone, note) {
+  try {
+    const sheets = await getSheetsClient();
+    // Fetch all candidates to find the row
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A1:Z10000`
+    });
+    const rows = res.data.values || [];
+    if (!rows.length) return;
+    
+    // Find the row index (1-based for Sheets API)
+    const phoneCol = COL.phone - 1;
+    const notesCol = 8; // I = 9th column, 0-based index is 8
+    let foundRow = -1;
+    
+    for (let i = 1; i < rows.length; ++i) {
+      const rowPhone = (rows[i][phoneCol] || '').replace(/\s+/g, '');
+      if (normalizePhoneE164(rowPhone) === normalizePhoneE164(phone)) {
+        foundRow = i + 1; // +1 for header row, +1 for 1-based
+        break;
+      }
+    }
+    if (foundRow === -1) return;
+    
+    // Get current notes and append new note
+    let currentNotes = (rows[foundRow-1][notesCol] || '').trim();
+    let newNotes = currentNotes ? `${currentNotes} | ${note}` : note;
+    
+    // Update the notes cell
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!I${foundRow}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [[newNotes]] }
+    });
+    console.log(`[SHEET] Updated Notes for ${phone}: ${note}`);
+  } catch (e) {
+    console.error('[SHEET] Error updating Notes:', e?.message || e);
+  }
+}
+
 // index.js
-// Flow principal: 11 → (reply=next) o (2h→NF) → (reply=next) o (2h→Des)
+// Flow principal: 11 → (reply=next) o (2h→NF) → (reply=next) o (2h→2NF)
 // Programados por fecha de proceso (por candidato):
-//   21 (2 días antes 16:00)  • 22 (2 días antes 16:05)
-//   23 (1 día antes 09:00)   • 24 (1 día antes 16:26)
-//   41 (1 día después 16:00)
+//   21 (2 días antes 11:00)  • 22 (en respuesta al 21)
+//   23 (1 día antes 11:00)   • 24 (en respuesta al 23)
+//   31 (0 día antes 12:00)   • 33 (en respuesta al 31)
+//   41 (1 día después 19:00)
 
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
-const express = require('express');
 const QRCode = require('qrcode');
-// ================== QR WEB SERVER ==================
-let latestQR = null;
-let qrTimestamp = 0;
-const qrListeners = [];
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Endpoint para mostrar el QR como imagen y refrescar automáticamente
-app.get('/qr', async (req, res) => {
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  let html = `<!DOCTYPE html><html><head><title>WhatsApp QR</title>
-    <meta name='viewport' content='width=device-width,initial-scale=1'>
-    <style>body{font-family:sans-serif;text-align:center;background:#f9f9f9}#qr{margin:2em auto;max-width:90vw;}h1{color:#25d366}#refresh{color:#888;font-size:0.9em}</style>
-    <script>
-      function pollQR() {
-        fetch('/qr-data').then(r => r.json()).then(data => {
-          if (data.qr && data.qr !== window.lastQR) {
-            document.getElementById('qrimg').src = 'data:image/png;base64,' + data.img;
-            window.lastQR = data.qr;
-            document.getElementById('refresh').textContent = 'Actualizado: ' + new Date(data.ts).toLocaleTimeString();
-          }
-          setTimeout(pollQR, 2000);
-        });
-      }
-      window.onload = pollQR;
-    </script>
-  </head><body>
-    <h1>Escanea el QR de WhatsApp</h1>
-    <div id='qr'>
-      <img id='qrimg' src='' alt='QR' style='width:320px;max-width:90vw;background:#fff;padding:8px;border-radius:8px;box-shadow:0 2px 8px #0001'>
-    </div>
-    <div id='refresh'>Cargando QR...</div>
-    <p>Abre WhatsApp y escanea este código para iniciar sesión.</p>
-  </body></html>`;
-  res.end(html);
-});
-
-// Endpoint para obtener el QR y la imagen en base64 (para AJAX)
-app.get('/qr-data', async (req, res) => {
-  if (!latestQR) return res.json({ qr: null });
-  try {
-    const img = await QRCode.toDataURL(latestQR, { margin: 2, width: 320 });
-    res.json({ qr: latestQR, img: img.replace(/^data:image\/png;base64,/, ''), ts: qrTimestamp });
-  } catch (e) {
-    res.json({ qr: latestQR, img: null, ts: qrTimestamp });
-  }
-});
-
-app.get('/', (req, res) => res.redirect('/qr'));
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Servidor Express escuchando en http://localhost:${PORT}/qr`);
-});
+const express = require('express');
 const { google } = require('googleapis');
 const fs = require('fs');
 const path = require('path');
 
-if (process.env.GOOGLE_SERVICE_ACCOUNT_BASE64) {
-  const jsonPath = path.join(__dirname, 'service-account.json');
-  fs.writeFileSync(
-    jsonPath,
-    Buffer.from(process.env.GOOGLE_SERVICE_ACCOUNT_BASE64, 'base64').toString('utf-8')
-  );
-}
-// Ahora puedes usar service-account.json normalmente
-
 /* ================== CONFIG ================== */
 
 // ---- Google Sheets (AppSheet escribe aquí) ----
-const SPREADSHEET_ID = process.env.SHEET_ID || '1ZW__7IeXpwzTu9TDzA8IToKwFpiq3q_gtvgYwDnhbKg'; // SOLO el ID
+const SPREADSHEET_ID = process.env.SHEET_ID || '1ataoMxpKoOTdoQWDEAX0vO2k7icEoPtz8TDvY51G5Fc'; // SOLO el ID
 const SHEET_RANGE    = process.env.SHEET_RANGE || 'Mensajes!A:B'; // A: Code, B: Message (no esencial, usamos A1:Z)
 const SA_FILE        = process.env.SA_FILE || 'service-account.json';
 
@@ -141,9 +162,11 @@ const client = new Client({
   puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] }
 });
 
-// ---- Tiempos de NF / Des ---- (ajusta a producción: 2h = 2 * 60 * 60 * 1000)
-const TIME_NF_MS  = 1 * 60 * 1000; // 1 min (testing)
-const TIME_DES_MS = 1 * 60 * 1000; // 1 min (testing)
+// ---- Tiempos de NF / 2NF ---- (ajusta a producción: 2h = 2 * 60 * 60 * 1000)
+const TIME_NF_MS  = 20 * 60 * 1000; // 20 minutos
+const TIME_2NF_MS = 20 * 60 * 1000; // 20 minutos
+// const TIME_NF_MS  = 1 * 60 * 1000; // 1 min (testing)
+// const TIME_2NF_MS = 1 * 60 * 1000; // 1 min (testing)
 
 // ---- Hoja "Candidatos contactados" (A=1) ----
 const SHEET_NAME = 'Candidatos contactados';
@@ -159,6 +182,11 @@ const DRY_RUN = false; // true para pruebas sin enviar
 
 // ---- Zona horaria recomendada ----
 const TZ = 'Europe/Madrid';
+
+// ---- Express Server para QR ----
+const app = express();
+const PORT = process.env.PORT || 3000;
+let currentQR = null;
 
 /* ================== HELPERS ================== */
 
@@ -374,13 +402,17 @@ async function fetchCandidates() {
   const out = [];
   // Column S = 19 (0-based index 18)
   for (const r of rows.slice(1)) {
-    const estatus = (r[18] || '').trim().toLowerCase();
-    if (estatus === 'inactivo') continue;
+    const estatus = (r[18] || '').trim();
+    const procesoStatus = (r[15] || '').trim();
+    
+    if (estatus !== 'Activo') continue;
+    if (procesoStatus !== 'Proceso' && procesoStatus !== 'Examen') continue;
     out.push({
-      process: (r[COL.process - 1] || '').trim(), // ej. 21ago25
+      process: (r[COL.process - 1] || '').trim(), 
       phone:   (r[COL.phone   - 1] || '').trim(),
       name:    (r[COL.name    - 1] || '').trim(),
-      estatus
+      estatus,
+      procesoStatus
     });
   }
   return out;
@@ -393,7 +425,8 @@ const UNINTERESTED_REGEX = /no (quiero|me interesa|puedo|continuar|asistir|segui
 
 const FLOW = ['11','12','13','14'];
 const NF_CODE  = 'NF';
-const DES_CODE = 'Des';
+const DES_CODE = '2NF';
+const UNINTERESTED_CODE = 'DES'; // ← Nueva constante para mensajes de desinterés
 const state = Object.create(null);
 
 function clearTimers(jid) {
@@ -427,25 +460,50 @@ async function sendMainStep(jid, name) {
 
 async function sendNF(jid, name) {
   const s = state[jid] || {};
-  if (!['wait_reply'].includes(s.phase)) return;
+  // Permitir NF tanto para flujo principal como para mensajes programados
+  if (!['wait_reply'].includes(s.phase) && !s.lastScheduledSent) return;
+  
   const body = fillVars(TEMPLATES[NF_CODE], { name });
+  
+  // Actualizar columna de Notas para NF (no AvWPP)
+  const phone = (jid || '').replace(/@c\.us$/, '');
+  await updateNotes(phone, NF_CODE);
+  
   await sendWhatsApp(jid, body);
   console.log(`⏰ Sent NF to ${jid}`);
   clearTimers(jid);
   state[jid] = { ...s, phase: 'wait_nf',
-    desTimer: setTimeout(() => sendDes(jid, name), TIME_DES_MS) };
+    desTimer: setTimeout(() => send2NF(jid, name), TIME_2NF_MS) };
 }
 
-async function sendDes(jid, name) {
+async function send2NF(jid, name) {
   const s = state[jid] || {};
   if (s.phase !== 'wait_des' && s.phase !== 'wait_nf' && s.phase !== 'awaiting_confirmation') {
     // Igual enviamos como cierre si ya no interesa
   }
   const body = fillVars(TEMPLATES[DES_CODE], { name });
+  
+  // Actualizar sheet: agregar 2NF a AvWPP, cambiar estatus a Inactivo y agregar a notas
+  const phone = (jid || '').replace(/@c\.us$/, '');
+  await updateStatusToInactive(phone);
+  await updateNotes(phone, DES_CODE);
+  
   await sendWhatsApp(jid, body);
-  console.log(`⏰ Sent Des to ${jid}`);
+  console.log(`⏰ Sent 2NF to ${jid}`);
   clearTimers(jid);
   state[jid] = { ...s, phase: 'done' };
+}
+
+// Nueva función para enviar mensaje DES
+async function sendDES(jid, name) {
+  const body = fillVars(TEMPLATES[UNINTERESTED_CODE], { name });
+  const phone = (jid || '').replace(/@c\.us$/, '');
+  await updateStatusToInactive(phone);
+  await updateNotes(phone, UNINTERESTED_CODE);
+  await sendWhatsApp(jid, body);
+  console.log(`🚫 Sent DES to ${jid}`);
+  clearTimers(jid);
+  state[jid] = { ...state[jid], phase: 'done' };
 }
 
 // Antes lo llamabas dentro del handler, aquí va arriba y único
@@ -459,13 +517,25 @@ function isStrongUninterested(text) {
 
 // Definición precisa
 const SCHEDULED_FLOW = [
-  { codes: ['21'], offsetDays: 2, hour: 16, minute: 0  }, // 2 días antes 16:00
-  { codes: ['22'], offsetDays: 2,  hour: 16, minute: 5  }, // 2 días antes 16:05
-  { codes: ['23'], offsetDays: 1,  hour: 9,  minute: 0  }, // 1 día  antes 09:00
-  { codes: ['24'], offsetDays: 1,  hour: 16, minute: 26 }, // 1 día  antes 16:26
-  { codes: ['31', '33'], offsetDays: 0, hour: 18, minute: 0  }, // On proceso day at 16:00
-  { codes: ['41'], offsetDays: -1, hour: 16, minute: 0  }, // 1 día  después 16:00
+  { codes: ['21'], offsetDays: 2, hour: 11, minute: 0 }, // 2 días antes 11:00
+  { codes: ['23'], offsetDays: 1,  hour: 11,  minute: 0 }, // 1 día  antes 11:00
+  { codes: ['31'], offsetDays: 0, hour: 12, minute: 0 }, // En el día del proceso a las 12:00
+  { codes: ['41'], offsetDays: -1, hour: 19, minute: 30 }, // 1 día  después 19:30
 ];
+
+// Definir pares de respuesta: cuando responden al primer código, se envía el segundo
+const RESPONSE_PAIRS = {
+  '21': '22', // Cuando responden al 21, enviar 22
+  '23': '24', // Cuando responden al 23, enviar 24
+  '31': '33'  // Cuando responden al 31, enviar 33
+};
+
+// Definir dependencias: qué mensaje requiere respuesta del anterior
+const RESPONSE_DEPENDENCIES = {
+  '23': '22', // 23 solo se envía si respondió al 22
+  '31': '24', // 31 solo se envía si respondió al 24
+  '41': '33'  // 41 solo se envía si respondió al 33
+};
 
 // Enviar si toca (NO depende del flujo 11–14)
 async function checkAndSendScheduled(jid, name, procesoDate) {
@@ -482,6 +552,16 @@ async function checkAndSendScheduled(jid, name, procesoDate) {
     for (const code of block.codes) {
       if (state[jid].scheduled[code]) continue;
 
+      // Verificar dependencias: si este código requiere respuesta previa
+      const requiredResponse = RESPONSE_DEPENDENCIES[code];
+      if (requiredResponse) {
+        const hasResponded = state[jid].responses && state[jid].responses[requiredResponse];
+        if (!hasResponded) {
+          console.log(`[SCHEDULED] Skipping ${code} for ${jid}: no response to ${requiredResponse}`);
+          continue;
+        }
+      }
+
       // offsetDays: positivo = días antes, negativo = después
       const when = new Date(procesoDate);
       when.setDate(when.getDate() - block.offsetDays);
@@ -491,13 +571,78 @@ async function checkAndSendScheduled(jid, name, procesoDate) {
 
       if (isWithinWindow(now, when, 10)) { // ventana ±10 min
         const body = fillVars(TEMPLATES[code], { name });
+        const phone = (jid || '').replace(/@c\.us$/, '');
+        // Actualizar sheet antes de enviar
+        await updateAvWPP(phone, code);
+  
         await sendWhatsApp(jid, body);
         state[jid].scheduled[code] = true;
+  
+        // NUEVO: Rastrear el último mensaje programado enviado
+        state[jid].lastScheduledSent = code;
+        
+        // Programar NF para mensajes programados que no son de respuesta automática
+        if (
+          !RESPONSE_PAIRS[Object.keys(RESPONSE_PAIRS).find(key => RESPONSE_PAIRS[key] === code)]
+          && code !== '41' // ← No programar NF para 41
+        ) {
+          clearTimers(jid); // Limpiar timers existentes
+          state[jid].nfTimer = setTimeout(() => sendNF(jid, name), TIME_NF_MS);
+        }
+  
         console.log(`✅ Sent (${code}) to ${jid} (scheduled)`);
         await sleep(300);
       }
     }
   }
+}
+
+// Detectar respuestas positivas
+function isPositiveResponse(text) {
+  const positiveRegex = /(gracias|perfecto|genial|excelente|ok|vale|bien|entendido|recibido|de acuerdo|correcto|sí|si|okey|okay|👍|✅)/i;
+  return positiveRegex.test(text);
+}
+
+// Verificar si se debe enviar mensaje de respuesta
+async function checkAndSendResponseMessage(jid, name, receivedText) {
+  if (!state[jid] || !state[jid].lastScheduledSent) return false;
+  
+  const lastSent = state[jid].lastScheduledSent;
+  const responseCode = RESPONSE_PAIRS[lastSent];
+  
+  if (!responseCode) return false;
+  
+  // Verificar que no se haya enviado ya este código de respuesta
+  if (state[jid].scheduled && state[jid].scheduled[responseCode]) {
+    return false;
+  }
+  
+  // Verificar que sea una respuesta positiva/confirmación
+  if (CONFIRM_REGEX.test(receivedText) || isPositiveResponse(receivedText)) {
+    const body = fillVars(TEMPLATES[responseCode], { name });
+    const phone = (jid || '').replace(/@c\.us$/, '');
+    
+    // Actualizar sheet antes de enviar
+    await updateAvWPP(phone, responseCode);
+    
+    await sendWhatsApp(jid, body);
+    
+    // Marcar como enviado
+    if (!state[jid].scheduled) state[jid].scheduled = {};
+    state[jid].scheduled[responseCode] = true;
+    
+    // CRUCIAL: Actualizar lastScheduledSent para que el usuario pueda responder al nuevo mensaje
+    state[jid].lastScheduledSent = responseCode;
+    
+    // Programar NF para los mensajes de respuesta automática también
+    clearTimers(jid); // Limpiar timers existentes
+    state[jid].nfTimer = setTimeout(() => sendNF(jid, name), TIME_NF_MS);
+    
+    console.log(`✅ Sent response message (${responseCode}) to ${jid} after receiving response to ${lastSent}`);
+    return true;
+  }
+  
+  return false;
 }
 
 async function runScheduledBlocks() {
@@ -522,9 +667,9 @@ async function runScheduledBlocks() {
       const name = c.name || 'Candidato';
       const procesoDate = parseProcesoDate(c.process);
       if (!procesoDate) continue;
-      if (!canSendScheduled(jid)) {
+      if (!(await canSendScheduled(jid))) {
         // Debug: show why skipping
-        // console.log(`[SCHEDULED] Skipping ${jid}: main flow not finished`);
+        console.log(`[SCHEDULED] Skipping ${jid}: main flow not finished`);
         continue;
       }
       await checkAndSendScheduled(jid, name, procesoDate);
@@ -534,18 +679,79 @@ async function runScheduledBlocks() {
   }
 }
 
-/* ================== MAIN ================== */
+/* ================== WEB SERVER ================== */
 
-client.on('qr', (qr) => {
-  latestQR = qr;
-  qrTimestamp = Date.now();
-  qrcode.generate(qr, { small: true }); // sigue mostrando en consola
-  // Notificar listeners (si algún día se usan SSE/websockets)
-  qrListeners.forEach(fn => fn(qr));
+// Ruta para mostrar el QR
+app.get('/', (req, res) => {
+  if (!currentQR) {
+    res.send(`
+      <html>
+        <head><title>WhatsApp Bot QR</title></head>
+        <body style="text-align: center; font-family: Arial;">
+          <h1>WhatsApp Bot</h1>
+          <p>Esperando código QR...</p>
+          <script>setTimeout(() => location.reload(), 5000);</script>
+        </body>
+      </html>
+    `);
+    return;
+  }
+
+  res.send(`
+    <html>
+      <head><title>WhatsApp Bot QR</title></head>
+      <body style="text-align: center; font-family: Arial;">
+        <h1>Escanea este código QR con WhatsApp</h1>
+        <img src="${currentQR}" alt="QR Code" style="border: 1px solid #ccc;" />
+        <p>Una vez escaneado, el bot estará listo para funcionar</p>
+        <script>setTimeout(() => location.reload(), 10000);</script>
+      </body>
+    </html>
+  `);
+});
+
+// Ruta para obtener solo el QR en formato imagen
+app.get('/qr', (req, res) => {
+  if (!currentQR) {
+    res.status(404).send('QR no disponible');
+    return;
+  }
+  
+  // Extraer los datos base64 y enviar la imagen
+  const base64Data = currentQR.replace(/^data:image\/png;base64,/, '');
+  const img = Buffer.from(base64Data, 'base64');
+  
+  res.writeHead(200, {
+    'Content-Type': 'image/png',
+    'Content-Length': img.length
+  });
+  res.end(img);
+});
+
+// Iniciar servidor Express
+app.listen(PORT, () => {
+  console.log(`🌐 Servidor web ejecutándose en puerto ${PORT}`);
+  console.log(`🔗 QR disponible en: http://localhost:${PORT}`);
+});
+
+/* ================== WHATSAPP CLIENT ================== */
+
+client.on('qr', async (qr) => {
+  console.log('📱 Código QR generado');
+  qrcode.generate(qr, { small: true });
+  
+  try {
+    // Generar QR como imagen base64 para la web
+    currentQR = await QRCode.toDataURL(qr);
+    console.log('🌐 QR disponible en el servidor web');
+  } catch (err) {
+    console.error('Error generando QR para web:', err);
+  }
 });
 
 client.on('authenticated', () => {
   console.log('✅ Cliente autenticado');
+  currentQR = null; // Limpiar QR una vez autenticado
 });
 
 client.on('ready', async () => {
@@ -590,6 +796,32 @@ client.on('message', async (msg) => {
     return;
   }
 
+  // NUEVO: Verificar si debe enviar mensaje de respuesta a mensajes programados
+  const sentResponseMessage = await checkAndSendResponseMessage(jid, candidate.name || name, text);
+  if (sentResponseMessage) {
+    // Si se envió un mensaje de respuesta, no procesar el flujo principal
+    return;
+  }
+
+  // Marcar respuestas a mensajes programados y cancelar timers NF/2NF
+  if (isPositiveResponse(text) || CONFIRM_REGEX.test(text)) {
+    if (!state[jid]) state[jid] = {};
+    if (!state[jid].responses) state[jid].responses = {};
+    
+    // Cancelar timers cuando hay respuesta a mensajes programados
+    const lastSent = state[jid].lastScheduledSent;
+    if (['21', '22', '23', '24', '31', '33', '41'].includes(lastSent)) {
+      clearTimers(jid); // Cancelar NF/2NF porque respondió
+      console.log(`[RESPONSE] User ${jid} responded to scheduled message ${lastSent}, timers cleared`);
+    }
+    
+    // Verificar si el último mensaje enviado fue 22, 24, o 33 para habilitar siguientes
+    if (['22', '24', '33'].includes(lastSent)) {
+      state[jid].responses[lastSent] = true;
+      console.log(`[RESPONSE] User ${jid} responded to ${lastSent}, enabling next message`);
+    }
+  }
+
   // Estado inicial
   let s = state[jid] || {};
   if (!s.phase) s.phase = 'awaiting_confirmation';
@@ -607,7 +839,7 @@ client.on('message', async (msg) => {
       await sendMainStep(jid, name);
     } else if (isStrongUninterested(text)) {
       state[jid] = { ...s, phase: 'done' };
-      await sendDes(jid, name);
+      await sendDES(jid, name); // ← Envía DES en vez de 2NF
       console.log(`🚫 Usuario no interesado (${jid}): ${text}`);
     } else {
       console.log(`[WAIT] Awaiting confirmation from ${jid}`);
@@ -619,7 +851,7 @@ client.on('message', async (msg) => {
   if (s.phase === 'wait_reply' || s.phase === 'wait_nf') {
     if (isStrongUninterested(text)) {
       state[jid] = { ...s, phase: 'done' };
-      await sendDes(jid, name);
+      await sendDES(jid, name); // ← Envía DES en vez de 2NF
       console.log(`🚫 Usuario no interesado (${jid}): ${text}`);
       return;
     }
@@ -635,7 +867,31 @@ client.on('message', async (msg) => {
 
 client.initialize();
 
-function canSendScheduled(jid) {
-  const s = state[jid];
-  return s && (s.step || 0) >= FLOW.length && s.phase === 'done';
+async function canSendScheduled(jid) {
+  try {
+    const sheets = await getSheetsClient();
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A1:Q10000`
+    });
+    
+    const rows = res.data.values || [];
+    const phoneCol = COL.phone - 1;
+    const qCol = 16; // Columna Q (AvWPP)
+    
+    // Buscar fila del usuario
+    for (let i = 1; i < rows.length; i++) {
+      const rowPhone = (rows[i][phoneCol] || '').replace(/\s+/g, '');
+      if (normalizePhoneE164(rowPhone) === normalizePhoneE164(jid.replace('@c.us', ''))) {
+        const avWPP = (rows[i][qCol] || '').trim();
+        // Si contiene "14", el flujo principal está completo
+        return avWPP.includes('14');
+      }
+    }
+    return false;
+  } catch (e) {
+    console.error('[canSendScheduled ERROR]', e);
+    return false;
+  }
 }
+//Si necesitas mas dudas puedes preguntar a Didara
