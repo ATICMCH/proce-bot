@@ -11,7 +11,12 @@ npm-debug.log*
 
 # Google Cloud credentials
 service-account.json
-*.json
+
+# Allow specific JSON config files
+!ecosystem.config.json
+!package.json
+!package-lock.json
+!.env.example
 
 # WhatsApp Web.js session data
 .wwebjs_auth/
